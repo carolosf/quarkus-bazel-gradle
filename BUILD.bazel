@@ -1,0 +1,91 @@
+filegroup(
+    name = "gradle-build-metadata",
+    srcs = glob([
+        "build.gradle.kts",
+        "settings.gradle.kts",
+        "gradle.properties"
+    ])
+)
+
+load("@rules_gradle//:rules_gradle.bzl", "gradle_build")
+# Run with `bazel build :project`
+gradle_build(
+    name = "project",
+    srcs = [":gradle-build-metadata"] + glob(["src/**"]),
+    gradle = "@rules_gradle//:gradle"
+)
+
+load("@rules_gradle//:rules_gradle.bzl", "directory_select")
+# The only directory we are interested in for making a container image is build/quarkus-app from the build dir
+directory_select(
+    # Name will be used in strip_prefix for pkg_tar
+    name = "get_build_quarkus_app_dir",
+    srcs = [":project"],
+    # We only want the quarkus-app directory from build/quarkus-app
+    source_path = "quarkus-app"
+)
+
+# For debugging
+#genrule(
+#    name = "debug_dir_layout",
+#    srcs = [":get_build_quarkus_app_dir"],
+#    outs = ["file.txt"],
+#    cmd = """
+#    find . > $(location file.txt)
+#    """,
+#)
+
+load("@bazel_tools//tools/build_defs/pkg:pkg.bzl", "pkg_tar")
+# We are going to create a tar with the directory structure we want for the container image
+pkg_tar(
+    name = "deployment_tar",
+    srcs = [":get_build_quarkus_app_dir"],
+    mode = "0755",
+    package_dir = "/deployments",
+    # This name ***HAS TO BE*** the same name as the directory_select above
+    strip_prefix = "/get_build_quarkus_app_dir"
+)
+
+load(
+    "@io_bazel_rules_docker//container:container.bzl",
+    "container_image"
+)
+
+# inspired by src/main/docker/Dockerfile.jvm
+# Build with `bazel build :quarkus_app_image`
+# Create image and push it to local docker with:  `bazel run :quarkus_app_image`
+# After above command can run docker image with `docker run -it -p 8080:8080  bazel:quarkus_app_image`
+# -it parameter preserves quarkus console output colours
+container_image(
+    name = "quarkus_app_image",
+    base = "@openjdk-11//image",
+    env = {
+        'LANG':'en_US.UTF-8',
+        'LANGUAGE':'en_US:en',
+        'AB_JOLOKIA_OFF':"",
+        'JAVA_OPTS':"-Dquarkus.http.host=0.0.0.0 -Djava.util.logging.manager=org.jboss.logmanager.LogManager",
+        'JAVA_APP_JAR':"/deployments/quarkus-run.jar"
+    },
+    tars = [":deployment_tar"]
+)
+
+# Alternative method to generate docker image from dockerfile but might not be hermetic
+# and image won't we exactly the same due to file time stamps
+# Build with `bazel build :quarkus_app_image_from_dockerfile`
+# Then load into docker with `docker load -i bazel-bin/dockerimage.tar`
+# Then run with docker `docker run -it bazel:quarkus_app_image_from_dockerfile`
+genrule(
+    name = "quarkus_app_image_from_dockerfile",
+    # Do not include .dockerignore file here otherwise weird errors occur
+    srcs = [":project",  "src/main/docker/Dockerfile.jvm"],
+    outs = ["dockerimage.tar"],
+    cmd = """
+    mkdir build
+    cp -L -R bazel-out/darwin-fastbuild/bin/external-gradle-build-dir-project/* build
+    export DOCKER_BUILDKIT=0
+    export COMPOSE_DOCKER_CLI_BUILD=0
+    export DOCKER_DEFAULT_PLATFORM=linux/amd64
+    docker build -f src/main/docker/Dockerfile.jvm -t bazel:quarkus_app_image_from_dockerfile .
+    docker save -o $(location dockerimage.tar) bazel:quarkus_app_image_from_dockerfile
+    """,
+)
