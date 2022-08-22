@@ -1,6 +1,6 @@
 # quarkus-bazel-gradle Project
 
-This project uses (rules-gradle)[https://github.com/carolosf/rules_gradle] to build a quarkus application with gradle.
+This project uses [rules-gradle](https://github.com/carolosf/rules_gradle) to build a quarkus application with gradle.
 
 ## Building with bazel
 ```shell script
